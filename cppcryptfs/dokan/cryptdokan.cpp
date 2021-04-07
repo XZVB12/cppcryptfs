@@ -107,7 +107,11 @@ THE SOFTWARE.
 
 static BOOL g_HasSeSecurityPrivilege;
 
+#ifdef _DEBUG
+static BOOL g_DebugMode = TRUE;
+#else
 static BOOL g_DebugMode = FALSE;
+#endif
 static BOOL g_UseStdErr = FALSE;
 static BOOL g_UseLogFile = FALSE;
 
@@ -1930,7 +1934,9 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
 	  return -1;
   }
 
-  if (is_mountpoint_a_dir(mountpoint) && !is_suitable_mountpoint(mountpoint)) {
+  bool mount_point_is_a_dir = is_mountpoint_a_dir(mountpoint);
+
+  if (mount_point_is_a_dir && !is_suitable_mountpoint(mountpoint)) {
 	  if (!PathFileExists(mountpoint)) {
 		  mes = L"the mount point directory does not exist";
 	  } else {
@@ -2018,13 +2024,7 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
 
     CryptContext *con = &tdata->con;
 
-    con->m_bufferblocks = min(256, max(1, opts.numbufferblocks));
-
-	// initialize IoBufferPool singleton (will init if not already inited)
-	// block size is tuned for first mounted filesystem
-	// if subsquent mounts require a larger block due to setting being changed
-	// then those mounts buffers will come from the heap instead of the pool
-    IoBufferPool::getInstance(con->m_bufferblocks * CIPHER_BS); 
+    con->m_bufferblocks = min(4096, max(1, opts.numbufferblocks));	 
 
     con->m_dir_iv_cache.SetTTL(opts.cachettl);
     con->m_case_cache.SetTTL(opts.cachettl);
@@ -2192,8 +2192,36 @@ int mount_crypt_fs(const WCHAR* mountpoint, const WCHAR *path,
     handles[0] = con->m_mountEvent;
     handles[1] = hThread;
 
-    DWORD wait_result = WaitForMultipleObjects(
-        sizeof(handles) / sizeof(handles[0]), handles, FALSE, MOUNT_TIMEOUT);
+
+    
+    auto tick0 = ::GetTickCount64();
+
+    decltype(tick0) elapsed = 0;
+
+    DWORD wait_result = WAIT_TIMEOUT;
+
+    // polling makes sense only on drive letters because a mount point dir will
+    // already exist.  Also, Dokany calls back fast if the mount point is a dir
+
+    bool do_fast_mounting = opts.fastmounting && !mount_point_is_a_dir;
+
+    while (wait_result == WAIT_TIMEOUT && elapsed < MOUNT_TIMEOUT) {
+       
+        wait_result = WaitForMultipleObjects(
+                sizeof(handles) / sizeof(handles[0]), handles, FALSE, do_fast_mounting ? FAST_MOUNTING_WAIT : MOUNT_TIMEOUT);
+
+        if (do_fast_mounting) {
+            // it currently takes about 5 seconds for Dokany to call back that the fs mounted
+            // if the mount point is a drive letter, but the fs actually mounts almost instantly.
+            // so we also poll on it existing and assume everything succeded if it does exist
+            if (wait_result == WAIT_TIMEOUT && ::PathFileExists(con->GetConfig()->m_mountpoint.c_str())) {
+                wait_result = WAIT_OBJECT_0;
+            }
+            elapsed = ::GetTickCount64() - tick0;
+        } else {
+            elapsed = MOUNT_TIMEOUT;          
+        }       
+    }    
 
     if (wait_result != WAIT_OBJECT_0) {
       if (wait_result == (WAIT_OBJECT_0 + 1)) {

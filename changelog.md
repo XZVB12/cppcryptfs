@@ -2,6 +2,26 @@
 
 Changelog
 ------------
+
+v1.4.3.6, Feb 7 2021
+* Improve concurrency.
+* Fix tab order in ui.
+* Add 2MB and 4MB options for iobuffer sizes.
+* Increase max number of per-fs threads to 63.
+* Make better use of stack buffers.
+
+v1.4.3.5, Dec 6 2020
+* Use fast mounting only if mount point is a drive letter.  
+  It doesn't make sense to poll on an existing dir, and 
+  Dokany signals successful mounting fast if the mount point
+  is a dir.
+
+v1.4.3.4, Nov 28 2020
+* Add "enable fast mounting" setting (enabled by default).
+* Make cppcryptfs and cppcryptfsctl wait forever if the named pipe
+  is busy when trying to connect to a running instance of cppcryptfs
+  instead of timing out after 2 seconds.
+
 v1.4.3.3, Nov 7 2020
 * Add change password, print master key, and recover capabilities 
   to cppcryptfsctl.

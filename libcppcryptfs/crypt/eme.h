@@ -30,6 +30,8 @@ THE SOFTWARE.
 
 #include <windows.h>
 
+#include <util/util.h>
+
 #include "cryptdefs.h"
 
 #include "openssl/aes.h"
@@ -40,6 +42,11 @@ THE SOFTWARE.
 
 
 class CryptConfig;
+
+// we do EME only on individual path components (file/directory names)
+// a stack buffer of 384 bytes should handle all cases without
+// dynamic allocation being necessary
+typedef TempBuffer<BYTE, 384> EmeBuffer_t;
 
 class EmeCryptContext {
 public:
@@ -68,6 +75,6 @@ public:
 };
 
 
-BYTE* EmeTransform(const EmeCryptContext *eme_context, 
-	const BYTE *T, const BYTE *P, int len, bool direction);
+bool EmeTransform(const EmeCryptContext *eme_context, 
+	const BYTE *T, const BYTE *P, int len, bool direction, EmeBuffer_t& buffer);
 

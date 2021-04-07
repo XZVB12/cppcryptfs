@@ -33,7 +33,7 @@ THE SOFTWARE.
 class CryptContext;
 
 int
-read_block(CryptContext *con, HANDLE hfile, BYTE *inputbuf, int bytesinbuf, int *bytes_consumed, const unsigned char *fileid, unsigned long long block, unsigned char *ptbuf, void *openssl_crypt_context);
+read_block(CryptContext *con, HANDLE hfile, BYTE *inputbuf, int bytesinbuf, int *bytes_consumed, const unsigned char *fileid, unsigned long long block, unsigned char *ptbuf, EVP_CIPHER_CTX* openssl_crypt_context);
 
 int
-write_block(CryptContext *con, unsigned char *cipher_buf, HANDLE hfile, const unsigned char *fileid, unsigned long long block, const unsigned char *ptbuf, int ptlen, void *openssl_crypt_context, const unsigned char *iv);
+write_block(CryptContext *con, unsigned char *cipher_buf, HANDLE hfile, const unsigned char *fileid, unsigned long long block, const unsigned char *ptbuf, int ptlen, EVP_CIPHER_CTX* openssl_crypt_context, const unsigned char *iv);

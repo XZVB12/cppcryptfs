@@ -322,7 +322,10 @@ CString CMountPropertyPage::Mount(LPCWSTR argPath, LPCWSTR argMountPoint, LPCWST
 
 	opts.numthreads = theApp.GetProfileInt(L"Settings", L"Threads", PER_FILESYSTEM_THREADS_DEFAULT);
 
-	opts.numbufferblocks = theApp.GetProfileInt(L"Settings", L"BufferBlocks", BUFFERBLOCKS_DEFAULT);
+	opts.numbufferblocks = theApp.GetProfileInt(L"Settings", L"BufferBlocks", BUFFERBLOCKS_DEFAULT);	
+
+	if (opts.numbufferblocks < 1 || opts.numbufferblocks * 4 > MAX_IO_BUFFER_KB || !is_power_of_two(opts.numbufferblocks))
+		opts.numbufferblocks = BUFFERBLOCKS_DEFAULT;
 
 	opts.cachettl = theApp.GetProfileInt(L"Settings", L"CacheTTL", CACHETTL_DEFAULT);
 
@@ -337,6 +340,8 @@ CString CMountPropertyPage::Mount(LPCWSTR argPath, LPCWSTR argMountPoint, LPCWST
 	opts.encryptkeysinmemory = theApp.GetProfileInt(L"Settings", L"EncryptKeysInMemory", ENCRYPT_KEYS_IN_MEMORY_DEFAULT) != 0;
 
 	opts.cachekeysinmemory = theApp.GetProfileInt(L"Settings", L"CacheKeysInMemory", CACHE_KEYS_IN_MEMORY_DEFAULT) != 0;
+
+	opts.fastmounting = theApp.GetProfileInt(L"Settings", L"FastMounting", FAST_MOUNTING_DEFAULT) != 0;
 
 	bool bSavePassword = argMountPoint == NULL && (IsDlgButtonChecked(IDC_SAVE_PASSWORD) != 0);	
 	

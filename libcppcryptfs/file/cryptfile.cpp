@@ -28,12 +28,12 @@ THE SOFTWARE.
 
 #include "stdafx.h"
 #include "crypt/cryptdefs.h"
-#include "cryptio.h"
-#include "cryptfile.h"
 #include "filename/cryptfilename.h"
 #include "util/fileutil.h"
 #include "util/util.h"
 #include "crypt/crypt.h"
+#include "cryptio.h"
+#include "cryptfile.h"
 #include "iobufferpool.h"
 
 CryptFile *CryptFile::NewInstance(CryptContext *con)
@@ -179,16 +179,14 @@ BOOL CryptFileForward::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 
 	unsigned char *p = buf;
 
-	void *context;
+	shared_ptr<EVP_CIPHER_CTX> context;
 	GetKeys();
 	if (!m_con->GetConfig()->m_AESSIV) {
 		context = get_crypt_context(BLOCK_IV_LEN, AES_MODE_GCM);
 
 		if (!context)
 			return FALSE;
-	} else {
-		context = NULL;
-	}
+	} 
 
 	BOOL bRet = TRUE;
 
@@ -207,7 +205,7 @@ BOOL CryptFileForward::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 
 		if (blocks_spanned > 1 && m_con->m_bufferblocks > 1) {
 			inputbuflen = min(m_con->m_bufferblocks, blocks_spanned)*CIPHER_BS;
-			iobuf = IoBufferPool::getInstance()->GetIoBuffer(inputbuflen);
+			iobuf = IoBufferPool::getInstance().GetIoBuffer(inputbuflen, 0);
 			if (iobuf == NULL) {
 				SetLastError(ERROR_OUTOFMEMORY);
 				throw(-1);
@@ -220,6 +218,8 @@ BOOL CryptFileForward::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 		}
 
 		while (bytesleft > 0) {
+
+			ReLock(); // for fairness
 
 			LONGLONG blockno = offset / PLAIN_BS;
 			int blockoff = (int)(offset % PLAIN_BS);
@@ -246,11 +246,11 @@ BOOL CryptFileForward::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 
 				if (inputbuf) {
 					int consumed = 0;
-					advance = read_block(m_con, INVALID_HANDLE_VALUE, inputbuf + inputbufpos, bytesinbuf, &consumed, m_header.fileid, blockno, p, context);
+					advance = read_block(m_con, INVALID_HANDLE_VALUE, inputbuf + inputbufpos, bytesinbuf, &consumed, m_header.fileid, blockno, p, context.get());
 					inputbufpos += consumed;
 					bytesinbuf -= consumed;
 				} else {
-					advance = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, blockno, p, context);
+					advance = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, blockno, p, context.get());
 				}
 
 				if (advance < 0)
@@ -267,11 +267,11 @@ BOOL CryptFileForward::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 
 				if (inputbuf) {
 					int consumed = 0;
-					blockbytes = read_block(m_con, INVALID_HANDLE_VALUE, inputbuf + inputbufpos, bytesinbuf, &consumed, m_header.fileid, blockno, blockbuf, context);
+					blockbytes = read_block(m_con, INVALID_HANDLE_VALUE, inputbuf + inputbufpos, bytesinbuf, &consumed, m_header.fileid, blockno, blockbuf, context.get());
 					inputbufpos += consumed;
 					bytesinbuf -= consumed;
 				} else {
-					blockbytes = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, blockno, blockbuf, context);
+					blockbytes = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, blockno, blockbuf, context.get());
 				}
 
 				if (blockbytes < 0)
@@ -297,13 +297,10 @@ BOOL CryptFileForward::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 		}
 	} catch (...) {
 		bRet = FALSE;
-	}
-
-	if (context)
-		free_crypt_context(context);
+	}	
 
 	if (iobuf)
-		IoBufferPool::getInstance()->ReleaseIoBuffer(iobuf);
+		IoBufferPool::getInstance().ReleaseIoBuffer(iobuf);
 
 	return bRet;
 }
@@ -369,7 +366,7 @@ BOOL CryptFileForward::WriteVersionAndFileId()
 
 BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNwritten, LONGLONG offset, BOOL bWriteToEndOfFile, BOOL bPagingIo)
 {
-	
+		
 	if (m_real_file_size == (long long)-1)
 		return FALSE;
 
@@ -409,19 +406,31 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 				buflen = (DWORD)(l.QuadPart - offset);
 			}
 		}
-	}
+	}	
+
+	// if we're going to increase the size of the file we need
+	// to hold onto exclusive access
+
+	bool bGrowingFile = false;
 
 	if (m_is_empty) {
+		bGrowingFile = true;
 		if (!WriteVersionAndFileId())
 			return FALSE;	
 	} else {
 		LARGE_INTEGER size_down;
 		size_down.QuadPart = m_real_file_size;
-		adjust_file_offset_down(size_down);
+		adjust_file_offset_down(size_down);				
+
+		if (offset + buflen > size_down.QuadPart) {
+			bGrowingFile = true;
+		}
+
 		// if creating a hole, call this->SetEndOfFile() to deal with last block if necessary
-		if (offset > size_down.QuadPart && (size_down.QuadPart % PLAIN_BS)) {
+		if ((offset > size_down.QuadPart) && (size_down.QuadPart % PLAIN_BS)) {
 			DbgPrint(L"Calling SetEndOfFile %llu to deal with hole\n", offset);
-			SetEndOfFile(offset, FALSE);
+			if (!SetEndOfFile(offset, FALSE))
+				return FALSE;			
 		}
 	}
 
@@ -429,16 +438,14 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 
 	const unsigned char *p = buf;
 
-	void *context;
+	shared_ptr<EVP_CIPHER_CTX> context;
 	GetKeys();
 	if (!m_con->GetConfig()->m_AESSIV) {
 		context = get_crypt_context(BLOCK_IV_LEN, AES_MODE_GCM);
 
 		if (!context)
 			return FALSE;
-	} else {
-		context = NULL;
-	}
+	} 
 
 	IoBuffer *iobuf = NULL;
 	BYTE *outputbuf = NULL;
@@ -448,35 +455,42 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 
 	int blocks_spanned = (int)(((offset + buflen - 1) / PLAIN_BS) - (offset / PLAIN_BS)) + 1;
 
-	BYTE* ivbufptr;
-	BYTE* ivbufbase;
-	// If we're going to use less than 8KB worth of iv's (engough to write 2MB), 
-	// then use the stack buffer.  Otherwise, use the vector.
-	// We could use alloca() for this but don't want to.
-	vector<BYTE> ivbuf_vec;
-	BYTE ivbuf_stack[8 * 1024];
-	if (blocks_spanned * BLOCK_IV_LEN <= sizeof(ivbuf_stack)) {
-		ivbufptr = ivbufbase = ivbuf_stack;
-	} else {
-		ivbuf_vec.resize(blocks_spanned * BLOCK_IV_LEN);
-		ivbufptr = ivbufbase = &ivbuf_vec[0];
-	}
+	BYTE* ivbufptr = nullptr;
+	BYTE* ivbufbase = nullptr;
 
-	if (!get_random_bytes(m_con, ivbufptr, BLOCK_IV_LEN * blocks_spanned)) {
-		free_crypt_context(context);  // checks if context is null
-		return FALSE;
-	}
+	BYTE ivbuf[4096];
+
+	bool ivsonstack = static_cast<size_t>(blocks_spanned) * BLOCK_IV_LEN <= sizeof(ivbuf);
 
 	try {
 
 		if (blocks_spanned > 1 && m_con->m_bufferblocks > 1) {
 			outputbuflen = min(m_con->m_bufferblocks, blocks_spanned)*CIPHER_BS;
-			iobuf = IoBufferPool::getInstance()->GetIoBuffer(outputbuflen);
+			iobuf = IoBufferPool::getInstance().GetIoBuffer(outputbuflen, ivsonstack ? 0 : static_cast<size_t>(blocks_spanned) * BLOCK_IV_LEN);
 			if (iobuf == NULL) {
-				SetLastError(ERROR_OUTOFMEMORY);
+				::SetLastError(ERROR_OUTOFMEMORY);
 				throw(-1);
 			}
 			outputbuf = iobuf->m_pBuf;
+			if (ivsonstack)
+				ivbufptr = ivbufbase = ivbuf;
+			else
+				ivbufptr = ivbufbase = iobuf->m_pIvBuf;
+		} else {
+			if (ivsonstack) {
+				ivbufptr = ivbufbase = ivbuf;
+			} else {
+				iobuf = IoBufferPool::getInstance().GetIoBuffer(0, static_cast<size_t>(blocks_spanned) * BLOCK_IV_LEN);
+				if (iobuf == NULL) {
+					::SetLastError(ERROR_OUTOFMEMORY);
+					throw(-1);
+				}
+				ivbufptr = ivbufbase = iobuf->m_pIvBuf;
+			}
+		}
+
+		if (!get_random_bytes(m_con, ivbufptr, blocks_spanned * BLOCK_IV_LEN)) {
+			throw(-1);
 		}
 
 		BYTE cipher_buf[CIPHER_BS];
@@ -494,14 +508,16 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 			}
 
 			if (blockoff == 0 && bytesleft >= PLAIN_BS) { // overwriting whole blocks
-
-				GoShared();
+				
+				// if bGrowingFile is true then we've got exclusive access for the duration of this operation
+				if (!bGrowingFile) 
+					GoShared();
 
 				if (outputbuf) {
 					if (outputbytes == 0)
 						beginblock = blockno;
 
-					advance = write_block(m_con, outputbuf + outputbytes, INVALID_HANDLE_VALUE, m_header.fileid, blockno, p, PLAIN_BS, context, ivbufptr);
+					advance = write_block(m_con, outputbuf + outputbytes, INVALID_HANDLE_VALUE, m_header.fileid, blockno, p, PLAIN_BS, context.get(), ivbufptr);
 					ivbufptr += BLOCK_IV_LEN;
 					
 					if (advance == CIPHER_BS) {
@@ -511,7 +527,7 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 					}
 					outputbytes += CIPHER_BS;
 				} else {
-					advance = write_block(m_con, cipher_buf, m_handle, m_header.fileid, blockno, p, PLAIN_BS, context, ivbufptr);
+					advance = write_block(m_con, cipher_buf, m_handle, m_header.fileid, blockno, p, PLAIN_BS, context.get(), ivbufptr);
 					ivbufptr += BLOCK_IV_LEN;
 
 					if (advance != PLAIN_BS)
@@ -527,12 +543,13 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 
 				unsigned char blockbuf[PLAIN_BS];
 
-				memset(blockbuf, 0, sizeof(blockbuf));
+				memset(blockbuf, 0, sizeof(blockbuf));				
 
-				// we need exclusive access
-				GoExclusive();
+				// if bGrowingFile is true then we've got exclusive access for the duration of this operation
+				if (!bGrowingFile)
+					GoExclusive(); // we need exclusive access
 
-				int blockbytes = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, blockno, blockbuf, context);
+				int blockbytes = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, blockno, blockbuf, context.get());
 
 				if (blockbytes < 0) {
 					bRet = FALSE;
@@ -548,7 +565,7 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 
 				int blockwrite = max(blockoff + blockcpy, blockbytes);
 
-				int nWritten = write_block(m_con, cipher_buf, m_handle, m_header.fileid, blockno, blockbuf, blockwrite, context, ivbufptr);
+				int nWritten = write_block(m_con, cipher_buf, m_handle, m_header.fileid, blockno, blockbuf, blockwrite, context.get(), ivbufptr);
 				ivbufptr += BLOCK_IV_LEN;
 
 				advance = blockcpy;
@@ -576,18 +593,15 @@ BOOL CryptFileForward::Write(const unsigned char *buf, DWORD buflen, LPDWORD pNw
 	*pNwritten = min(*pNwritten, buflen);
 
 	if (iobuf)
-		IoBufferPool::getInstance()->ReleaseIoBuffer(iobuf);
+		IoBufferPool::getInstance().ReleaseIoBuffer(iobuf);	
 
-	if (context)
-		free_crypt_context(context);
-
-	// we didn't use all ivs or went past the end of our ivs which is bad
-	if (ivbufptr != ivbufbase + blocks_spanned * BLOCK_IV_LEN) {
+	// we didn't use all ivs or went past the end of our ivs which is bad	
+	if (bRet && (ivbufptr != ivbufbase + static_cast<size_t>(blocks_spanned) * BLOCK_IV_LEN)) {
 		assert(false);
 		::SetLastError(ERROR_BAD_LENGTH);
 		bRet = FALSE;
 	}
-
+	
 	return bRet;
 	
 }
@@ -710,27 +724,22 @@ CryptFileForward::SetEndOfFile(LONGLONG offset, BOOL bSet)
 
 	memset(buf, 0, sizeof(buf));
 
-	void *context;
+	shared_ptr<EVP_CIPHER_CTX> context;
 	GetKeys();
 	if (!m_con->GetConfig()->m_AESSIV) {
 		context = get_crypt_context(BLOCK_IV_LEN, AES_MODE_GCM);
 
 		if (!context)
 			return FALSE;
-	} else {
-		context = NULL;
-	}
+	} 
 
-	int nread = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, last_block, buf, context);
+	int nread = read_block(m_con, m_handle, NULL, 0, NULL, m_header.fileid, last_block, buf, context.get());
 
-	if (nread < 0) {
-		free_crypt_context(context);
+	if (nread < 0) {	
 		return FALSE;
 	}
 
-	if (nread < 1) { // shouldn't happen
-		free_crypt_context(context);
-
+	if (nread < 1) { // shouldn't happen		
 		if (bSet) {
 			return SetEndOfFileInternal(up_off);
 		} else {
@@ -746,14 +755,11 @@ CryptFileForward::SetEndOfFile(LONGLONG offset, BOOL bSet)
 
 	BYTE iv[BLOCK_IV_LEN];
 
-	if (!get_random_bytes(m_con, iv, BLOCK_IV_LEN)) {
-		free_crypt_context(context);  // checks if context is null
+	if (!get_random_bytes(m_con, iv, BLOCK_IV_LEN)) {		
 		return FALSE;
 	}
 
-	int nwritten = write_block(m_con, cipher_buf, m_handle, m_header.fileid, last_block, buf, to_write, context, iv);
-
-	free_crypt_context(context);
+	int nwritten = write_block(m_con, cipher_buf, m_handle, m_header.fileid, last_block, buf, to_write, context.get(), iv);	
 
 	if (nwritten != to_write)
 		return FALSE;
@@ -857,16 +863,14 @@ BOOL CryptFileReverse::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 
 	unsigned char *p = buf;
 
-	void *context;
+	shared_ptr<EVP_CIPHER_CTX> context;
 	GetKeys();
 	if (!m_con->GetConfig()->m_AESSIV) {
 		context = get_crypt_context(BLOCK_IV_LEN, AES_MODE_GCM);
 
 		if (!context)
 			return FALSE;
-	} else {
-		context = NULL;
-	}
+	} 
 
 	BOOL bRet = TRUE;
 
@@ -912,7 +916,7 @@ BOOL CryptFileReverse::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 				}
 			
 				// advance = read_block(m_con, m_handle, m_header.fileid, blockno, p, context);
-				advance = write_block(m_con, p, INVALID_HANDLE_VALUE, m_header.fileid, blockno, plain_buf, (int)nRead, context, m_block0iv);
+				advance = write_block(m_con, p, INVALID_HANDLE_VALUE, m_header.fileid, blockno, plain_buf, (int)nRead, context.get(), m_block0iv);
 
 				if (advance < 0)
 					throw(-1);
@@ -940,7 +944,7 @@ BOOL CryptFileReverse::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 				}
 
 				//int blockbytes = read_block(m_con, m_handle, m_header.fileid, blockno, blockbuf, context);
-				int blockbytes = write_block(m_con, blockbuf, INVALID_HANDLE_VALUE, m_header.fileid, blockno, plain_buf, (int)nRead, context, m_block0iv);
+				int blockbytes = write_block(m_con, blockbuf, INVALID_HANDLE_VALUE, m_header.fileid, blockno, plain_buf, (int)nRead, context.get(), m_block0iv);
 
 				if (blockbytes < 0)
 					throw(-1);
@@ -965,10 +969,7 @@ BOOL CryptFileReverse::Read(unsigned char *buf, DWORD buflen, LPDWORD pNread, LO
 		}
 	} catch (...) {
 		bRet = FALSE;
-	}
-
-	if (context)
-		free_crypt_context(context);
+	}	
 
 	return bRet;
 }

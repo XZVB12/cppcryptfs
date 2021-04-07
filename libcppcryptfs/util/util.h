@@ -39,6 +39,7 @@ class CryptContext;
 
 void SetDbgVars(BOOL DebugMode, BOOL UseStdErr, BOOL UseLogFile, FILE* logfile);
 void DbgPrint(LPCWSTR format, ...);
+void DbgPrintAlways(LPCWSTR format, ...);
 
 const char *
 unicode_to_utf8(const WCHAR *unicode_str, char *buf, int buflen);
@@ -82,8 +83,6 @@ get_random_bytes(CryptContext *con, unsigned char *buf, DWORD len);
 
 bool get_sys_random_bytes(unsigned char *buf, DWORD len);
 
-DWORD getppid();
-
 bool have_args();
 
 bool OpenConsole(DWORD pid = 0);
@@ -98,6 +97,12 @@ int compare_names(CryptContext *con, LPCWSTR name1, LPCWSTR name2);
 
 bool is_all_zeros(const BYTE *buf, size_t len);
 
+template <typename T>
+bool is_power_of_two(const T& num)
+{
+	return ((num != 1) && (num & (num - 1))) == 0;
+}
+
 BOOL GetPathHash(LPCWSTR path, wstring& hashstr);
 
 void SetOverlapped(LPOVERLAPPED pOv, LONGLONG offset);
@@ -105,3 +110,47 @@ void SetOverlapped(LPOVERLAPPED pOv, LONGLONG offset);
 void IncOverlapped(LPOVERLAPPED pOv, DWORD increment);
 
 const wchar_t* get_command_line_usage();
+
+// this class is for cases where we need a temp buffer that
+// can usually be allocated on the stack, but we might
+// have cases where the buffer is too big for stack allocation
+// in which case we want to use a dynamically allocated buffer
+// from a vector.  So we do seomthing like
+//
+// size_t len = get_needed_len();
+// TempBuffer<char, 1024> tmp(len);
+// char *p = tmp.get();
+// or it can be constructed before size is known and then
+// get with a length will resize it.
+// e.g.
+// TempBuffer<char, 1024> tmp;
+// size_t len = get_needed_len();
+// char *p = get(len);
+
+template <typename T, size_t L>
+class TempBuffer {
+private:
+	vector<T> m_vec;
+	size_t m_len;
+	T m_buf[L];	
+public:
+	TempBuffer(size_t len = 0) : m_len(len) {}
+	T* get(size_t len = 0)
+	{
+		if (len)
+			m_len = len;
+
+		if (m_len <= L) {
+			return m_buf;
+		} else {
+			if (m_vec.size() < m_len) {
+				try {
+					m_vec.resize(m_len);
+				} catch (const std::bad_alloc&) {
+					return nullptr;
+				}
+			} 
+			return &m_vec[0];
+		}
+	}
+};
